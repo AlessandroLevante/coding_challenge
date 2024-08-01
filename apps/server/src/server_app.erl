@@ -1,5 +1,5 @@
 %%%-------------------------------------------------------------------
-%% @doc server public API
+%% @doc server public API 
 %% @end
 %%%-------------------------------------------------------------------
 
@@ -10,10 +10,13 @@
 -export([start/2, stop/1]).
 
 start(_StartType, _StartArgs) ->
-    erlang:display("Server started."),
+    erlang:display("Starting server..."),
+    tcp_server:start_link(6789),
     server_sup:start_link().
 
 stop(_State) ->
+    erlang:display("Stopping server..."),
+    erlang:display("Server stopped"),
     ok.
 
 %% internal functions

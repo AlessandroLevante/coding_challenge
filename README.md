@@ -31,3 +31,20 @@ $ rebar3 release
 ```
 $ coding_challenge foreground
 ```
+
+## Testing with client
+- Go into the <code>apps/client</code> folder
+- From a terminal, run the command:
+```
+$ rebar3 shell
+```
+- Then, run the command:
+```
+$ client_app:connect(Name).
+```
+Where Name is the name of the client
+- Or the command:
+```
+$ client_app:test_clients().
+```
+That will create 5 different clients and connect them to the server

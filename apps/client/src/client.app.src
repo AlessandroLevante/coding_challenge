@@ -1,8 +1,8 @@
-{application, server,
+{application, client,
  [{description, "An OTP application"},
   {vsn, "1.0.0"},
   {registered, []},
-  {mod, {server_app, []}},
+  {mod, {client_app, []}},
   {applications,
    [kernel,
     stdlib
