@@ -38,13 +38,19 @@ $ coding_challenge foreground
 ```
 $ rebar3 shell
 ```
-- For quick testing, you can run one of these two commands. First:
+For quick testing, you can run one of these commands:
+- Test clients
 ```
 $ client_app:test_clients().
 ```
 That will create 5 different clients and connect them to the server
-- Second:
+- Test rooms
 ```
 $ client_app:test_rooms().
 ```
 This will connect some clients and create different rooms, testing various cases of error and success.
+- Test private messages
+```
+$ client_app:test_private_messages().
+```
+This will connect some clients and send some private messages.

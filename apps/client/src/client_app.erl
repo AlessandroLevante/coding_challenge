@@ -8,9 +8,11 @@
 -behaviour(application).
 
 -export([start/2, stop/1]).
--export([connect/1, connect_create_room/2, connect_create_print_rooms/3, connect_create_room_receive_messages/2, connect_join_room_receive_messages/2, connect_join_room/2, connect_join_room_send_messages/2, connect_join_leave_room/2, connect_create_destroy_room/2, connect_join_leave_wrong_room/3, connect_create_destroy_wrong_room/3]).
+-export([connect/1]).
+-export([connect_create_room/2, connect_create_print_rooms/3, connect_create_room_receive_messages/2, connect_join_room_receive_messages/2, connect_join_room/2, connect_join_room_send_messages/2, connect_join_leave_room/2, connect_create_destroy_room/2, connect_join_leave_wrong_room/3, connect_create_destroy_wrong_room/3]).
 -export([receive_message/1]).
--export([test_clients/0, test_rooms/0]).
+-export([connect_send_private_message/3, connect_receive_messages/1]).
+-export([test_clients/0, test_rooms/0, test_private_messages/0]).
 
 start(_StartType, _StartArgs) ->
     client_sup:start_link().
@@ -74,6 +76,14 @@ connect_create_destroy_wrong_room(ClientName, CreateRoom, DestroyRoom) ->
     create_room(Sock, CreateRoom),
     destroy_room(Sock, DestroyRoom).
 
+connect_send_private_message(ClientName, PMClient, Message) ->
+    Sock = connect(ClientName),
+    send_private_message(Sock, PMClient, Message).
+
+connect_receive_messages(ClientName) ->
+    Sock = connect(ClientName),
+    receive_message(Sock).
+
 test_clients() ->
     Sock1 = connect("Client1"),
     Sock2 = connect("Client2"),
@@ -129,6 +139,26 @@ test_rooms() ->
     gen_tcp:close(Sock4),
     gen_tcp:close(Sock5).
 
+test_private_messages() ->
+    Sock1 = connect("Client1"),
+    Sock2 = connect("Client2"),
+    send_private_message(Sock2, "Client3", "Test"), % Should not send anything
+    Sock3 = connect("Client3"),
+    Sock4 = connect("Client4"),
+    Sock5 = connect("Client5"),
+
+    send_private_message(Sock3, "Client1", "Hi Client1"), % Should be OK
+    send_private_message(Sock3, "Client1", "I am Client3"), % Should be OK
+    send_private_message(Sock3, "Client1", "I am sending a private message"), % Should be OK
+
+    receive_message(Sock1),
+
+    gen_tcp:close(Sock1),
+    gen_tcp:close(Sock2),
+    gen_tcp:close(Sock3),
+    gen_tcp:close(Sock4),
+    gen_tcp:close(Sock5).
+
 % Utility internal methods
 create_room(Sock, RoomName) ->
     Packet = {create_room, RoomName},
@@ -169,6 +199,10 @@ send_message(Sock, RoomName, Message) ->
     Packet = {send_msg_room, {RoomName, Message}},
     gen_tcp:send(Sock, term_to_binary(Packet)).
 
+send_private_message(Sock, ClientName, Message) ->
+    Packet = {private_message, {ClientName, Message}},
+    gen_tcp:send(Sock, term_to_binary(Packet)).
+
 receive_message(Sock) ->
     case gen_tcp:recv(Sock, 0) of
         {ok, ReceivedPacket} ->
@@ -182,7 +216,12 @@ receive_message(Sock) ->
                     Room = element(2, Payload),
                     Message = element(3, Payload),
 
-                io:format("[~s] ~s: ~s~n", [Room, Sender, Message])
+                    io:format("[~s] ~s: ~s~n", [Room, Sender, Message]);
+                private_message ->
+                    Sender = element(1, Payload),
+                    Message = element(2, Payload),
+
+                    io:format("[PM] ~s: ~s~n", [Sender, Message])
             end;
         {error, Reason} ->
             ok

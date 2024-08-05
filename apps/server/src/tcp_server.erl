@@ -53,7 +53,9 @@ receiving_thread(Clients, Rooms) ->
         {leave_room, ClientSocket, RoomName} ->
             receiving_thread(Clients, remove_client_from_room(Rooms, Clients, ClientSocket, RoomName));
         {send_msg_room, ClientSocket, RoomName, Message} ->
-            send_message_to_room(Rooms, Clients, ClientSocket, Message, RoomName)
+            send_message_to_room(Rooms, Clients, ClientSocket, Message, RoomName);
+        {private_message, ClientSocket, ClientName, Message} ->
+            send_private_message(Clients, ClientSocket, Message, ClientName)
     end,
     receiving_thread(Clients, Rooms).
 
@@ -95,7 +97,12 @@ loop(Sock, ServerPid) ->
                     % Payload is a tuple containing room name and message to send
                     RoomName = element(1, Payload),
                     Message = element(2, Payload),
-                    ServerPid ! {send_msg_room, Sock, RoomName, Message}
+                    ServerPid ! {send_msg_room, Sock, RoomName, Message};
+                private_message ->
+                    % Payload is a tuple containing client name and message to send
+                    ClientName = element(1, Payload),
+                    Message = element(2, Payload),
+                    ServerPid ! {private_message, Sock, ClientName, Message}
             end,
             loop(Sock, ServerPid);
         {error, Reason} ->
@@ -143,6 +150,15 @@ get_client_from_socket(Clients, ClientSocket) ->
             [Client | Rest] = lists:filter(fun(Client) -> Client#client.socket == ClientSocket end, Clients),
             Client;
         false -> io:format("[ERROR] [~p] This client is not connected~n", [?FUNCTION_NAME])
+    end.
+
+get_client_by_name(Clients, ClientName) ->
+    % Check if a client with this name exists
+    case lists:any(fun(Client) -> Client#client.name == ClientName end, Clients) of
+        true -> 
+            [Client | Rest] = lists:filter(fun(Client) -> Client#client.name == ClientName end, Clients),
+            Client;
+        false -> ok
     end.
 
 % Returns the list of rooms containing the new room if the creation is successful
@@ -252,6 +268,17 @@ send_message_to_room(Rooms, Clients, ClientSocket, Message, RoomName) ->
             end;
         false ->
             io:format("[ERROR] [~p] Room '~s' doesn't exist~n", [?FUNCTION_NAME, RoomName])
+    end.
+
+send_private_message(Clients, ClientSocket, Message, ClientName) ->
+    Receiver = get_client_by_name(Clients, ClientName),
+    % Checking if client exists
+    case is_record(Receiver, client) of
+        true ->
+            Sender = get_client_from_socket(Clients, ClientSocket),
+            gen_tcp:send(Receiver#client.socket, term_to_binary({private_message, {Sender#client.name, Message}}));
+        false ->
+            io:format("[ERROR] [~p] Client '~s' doesn't exist~n", [?FUNCTION_NAME, ClientName])
     end.
 
 init(Arg) ->
