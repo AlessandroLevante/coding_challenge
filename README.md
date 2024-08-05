@@ -38,13 +38,13 @@ $ coding_challenge foreground
 ```
 $ rebar3 shell
 ```
-- Then, run the command:
-```
-$ client_app:connect(Name).
-```
-Where Name is the name of the client
-- Or the command:
+- For quick testing, you can run one of these two commands. First:
 ```
 $ client_app:test_clients().
 ```
 That will create 5 different clients and connect them to the server
+- Second:
+```
+$ client_app:test_rooms().
+```
+This will connect some clients and create different rooms, testing various cases of error and success.
