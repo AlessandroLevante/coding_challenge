@@ -12,7 +12,7 @@
 -export([connect_create_room/2, connect_create_print_rooms/3, connect_create_room_receive_messages/2, connect_join_room_receive_messages/2, connect_join_room/2, connect_join_room_send_messages/2, connect_join_leave_room/2, connect_create_destroy_room/2, connect_join_leave_wrong_room/3, connect_create_destroy_wrong_room/3]).
 -export([receive_message/1]).
 -export([connect_send_private_message/3, connect_receive_messages/1]).
--export([test_clients/0, test_rooms/0, test_private_messages/0]).
+-export([test_clients/0, test_rooms/0, test_private_messages/0, test_private_rooms/0]).
 
 start(_StartType, _StartArgs) ->
     client_sup:start_link().
@@ -159,9 +159,38 @@ test_private_messages() ->
     gen_tcp:close(Sock4),
     gen_tcp:close(Sock5).
 
+test_private_rooms() ->
+    Sock1 = connect("Client1"),
+    Sock2 = connect("Client2"),
+    Sock3 = connect("Client3"),
+
+    create_room(Sock1, "Room1"),
+    send_room_invite(Sock1, "Room1", "Client2"), % Should give ERROR
+
+    create_private_room(Sock1, "PrivateRoom1"), % Should be OK
+    send_room_invite(Sock1, "Room9", "Client2"), % Should give ERROR
+    send_room_invite(Sock3, "PrivateRoom1", "Client2"), % Should give ERROR
+    send_room_invite(Sock1, "PrivateRoom1", "Client2"), % Should be OK
+
+    receive_private_room_invitation(Sock2),
+
+    print_rooms(Sock3), % Should print Room1
+    print_rooms(Sock2), % Should print PrivateRoom1 and Room1
+
+    join_room(Sock3, "PrivateRoom1"), % Should give ERROR
+    join_room(Sock2, "PrivateRoom1"), % Should be OK
+
+    gen_tcp:close(Sock1),
+    gen_tcp:close(Sock2),
+    gen_tcp:close(Sock3).
+
 % Utility internal methods
 create_room(Sock, RoomName) ->
     Packet = {create_room, RoomName},
+    gen_tcp:send(Sock, term_to_binary(Packet)).
+
+create_private_room(Sock, RoomName) ->
+    Packet = {create_private_room, RoomName},
     gen_tcp:send(Sock, term_to_binary(Packet)).
 
 join_room(Sock, RoomName) ->
@@ -203,6 +232,10 @@ send_private_message(Sock, ClientName, Message) ->
     Packet = {private_message, {ClientName, Message}},
     gen_tcp:send(Sock, term_to_binary(Packet)).
 
+send_room_invite(Sock, ClientName, RoomName) ->
+    Packet = {send_room_invite, {ClientName, RoomName}},
+    gen_tcp:send(Sock, term_to_binary(Packet)).
+
 receive_message(Sock) ->
     case gen_tcp:recv(Sock, 0) of
         {ok, ReceivedPacket} ->
@@ -221,12 +254,35 @@ receive_message(Sock) ->
                     Sender = element(1, Payload),
                     Message = element(2, Payload),
 
-                    io:format("[PM] ~s: ~s~n", [Sender, Message])
+                    io:format("[PM] ~s: ~s~n", [Sender, Message]);
+                private_room_invitation ->
+                    Sender = element(1, Payload),
+                    Room = element(2, Payload),
+
+                    io:format("[Invitation] '~s' invited you to join private room '~s'~n", [Sender, Room])
             end;
         {error, Reason} ->
             ok
     end,
     receive_message(Sock).
+
+receive_private_room_invitation(Sock) ->
+    case gen_tcp:recv(Sock, 0) of
+        {ok, ReceivedPacket} ->
+            Tuple = binary_to_term(ReceivedPacket),
+            Type = element(1, Tuple),
+            Payload = element(2, Tuple),
+
+            case Type of
+                private_room_invitation ->
+                    Sender = element(1, Payload),
+                    Room = element(2, Payload),
+
+                    io:format("[Invitation] '~s' invited you to join private room '~s'~n", [Sender, Room])
+            end;
+        {error, Reason} ->
+            ok
+    end.
 
 % Returns socket
 connect_client(Port, Name) ->

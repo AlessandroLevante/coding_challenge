@@ -12,7 +12,7 @@
 
 % Records used
 -record(client, {name = "", socket}).
--record(room, {name = "", owner, clients = []}).  
+-record(room, {name = "", owner, type = public, clients = [], invited = []}).  
 
 % LPort -> Listening port of the server
 start_link(LPort) ->
@@ -45,9 +45,9 @@ receiving_thread(Clients, Rooms) ->
         {destroy_room, ClientSocket, RoomName} ->
             io:format("Trying to remove room '~s'...~n", [RoomName]),
             receiving_thread(Clients, remove_room(Rooms, RoomName, ClientSocket));
-        {list_rooms, ClientPid} ->
+        {list_rooms, ClientSocket, ClientPid} ->
             % Send message back with rooms list
-            ClientPid ! {list_rooms, get_rooms_list(Rooms)};
+            ClientPid ! {list_rooms, get_rooms_list(Clients, Rooms, ClientSocket)};
         {join_room, ClientSocket, RoomName} ->
             receiving_thread(Clients, add_client_to_room(Rooms, Clients, ClientSocket, RoomName));
         {leave_room, ClientSocket, RoomName} ->
@@ -55,7 +55,11 @@ receiving_thread(Clients, Rooms) ->
         {send_msg_room, ClientSocket, RoomName, Message} ->
             send_message_to_room(Rooms, Clients, ClientSocket, Message, RoomName);
         {private_message, ClientSocket, ClientName, Message} ->
-            send_private_message(Clients, ClientSocket, Message, ClientName)
+            send_private_message(Clients, ClientSocket, Message, ClientName);
+        {create_private_room, ClientSocket, RoomName} ->
+            receiving_thread(Clients, create_private_room(Rooms, Clients, ClientSocket, RoomName));
+        {send_room_invite, ClientSocket, RoomName, ClientName} ->
+            receiving_thread(Clients, send_room_invite(Rooms, Clients, ClientSocket, RoomName, ClientName))
     end,
     receiving_thread(Clients, Rooms).
 
@@ -80,7 +84,7 @@ loop(Sock, ServerPid) ->
                 list_rooms ->
                     % Empty payload
                     % Passing this thread's pid to receive the list back
-                    ServerPid ! {list_rooms, self()},
+                    ServerPid ! {list_rooms, Sock, self()},
                     % Waiting to receive list
                     receive
                         {list_rooms, Rooms} ->
@@ -102,7 +106,15 @@ loop(Sock, ServerPid) ->
                     % Payload is a tuple containing client name and message to send
                     ClientName = element(1, Payload),
                     Message = element(2, Payload),
-                    ServerPid ! {private_message, Sock, ClientName, Message}
+                    ServerPid ! {private_message, Sock, ClientName, Message};
+                create_private_room ->
+                    % Payload is room name
+                    ServerPid ! {create_private_room, Sock, Payload};
+                send_room_invite ->
+                    % Payload is tuple containing room name and client name
+                    RoomName = element(1, Payload),
+                    ClientName = element(2, Payload),
+                    ServerPid ! {send_room_invite, Sock, RoomName, ClientName}
             end,
             loop(Sock, ServerPid);
         {error, Reason} ->
@@ -177,6 +189,22 @@ create_room(Rooms, Clients, ClientSocket, RoomName) ->
             Rooms
     end.
 
+% Returns the list of rooms containing the new room if the creation is successful
+create_private_room(Rooms, Clients, ClientSocket, RoomName) ->
+    % Checking if room already exist
+    ExistingRoom = get_room_by_name(Rooms, RoomName),
+    case not is_record(ExistingRoom, room) of
+        true -> 
+            Room = #room{name = RoomName, owner = ClientSocket, type = private, clients = [get_client_from_socket(Clients, ClientSocket)], invited = [get_client_from_socket(Clients, ClientSocket)]},
+            io:format("Created private room '~s'~n", [RoomName]),
+            % Adding new room to rooms list
+            [Room | Rooms];
+        false ->
+            % If ExistingRoom is not a record it means a room with the passed name doesn't exist
+            io:format("[ERROR] [~p] Room '~s' already exists~n", [?FUNCTION_NAME, RoomName]),
+            Rooms
+    end.
+
 % Returns true if room must be removed
 % Room must be removed if passed name is related to a room owned by the caller
 should_room_be_removed(Room, RoomName, ClientSocket) ->
@@ -189,27 +217,43 @@ remove_room(Rooms, RoomName, ClientSocket) ->
     NewRooms = lists:filter(fun(Room) -> not should_room_be_removed(Room, RoomName, ClientSocket) end, Rooms).
 
 % Returns a list containing only the rooms' names
-get_rooms_list(Rooms) ->
-    [Room#room.name || Room <- Rooms].
+get_rooms_list(Clients, Rooms, ClientSocket) ->
+    Client = get_client_from_socket(Clients, ClientSocket),
+    [Room#room.name || Room <- Rooms, (Room#room.type == public) or ((Room#room.type == private) and (lists:member(Client, Room#room.invited)))].
 
 % Returns the list of rooms, adding the client that wants to connect to the room
 add_client_to_room(Rooms, Clients, ClientSocket, RoomName) ->
     Room = get_room_by_name(Rooms, RoomName),
     % Checking if room exists
     case is_record(Room, room) of
-        true -> 
+        true ->
             Client = get_client_from_socket(Clients, ClientSocket),
-            NewRoom = connect_client_to_room(Room, Client),
-            % Creating new list that contains all rooms different from Room, adding NewRoom
-            % Basically we are replacing Room with NewRoom
-            [NewRoom | [R || R <- Rooms, R /= Room]];
+            % Checking if room is public or private
+            case Room#room.type of
+                public ->
+                    NewRoom = connect_client_to_room(Room, Client),
+                    % Creating new list that contains all rooms different from Room, adding NewRoom
+                    % Basically we are replacing Room with NewRoom
+                    [NewRoom | [R || R <- Rooms, R /= Room]];
+                private ->
+                    case lists:member(Client, Room#room.invited) of
+                        true ->
+                            NewRoom = connect_client_to_room(Room, Client),
+                            % Creating new list that contains all rooms different from Room, adding NewRoom
+                            % Basically we are replacing Room with NewRoom
+                            [NewRoom | [R || R <- Rooms, R /= Room]];
+                        false ->
+                            io:format("[ERROR] [~p] Client '~s' has not been invited to room '~s'~n", [?FUNCTION_NAME, Client#client.name, RoomName]),
+                            Rooms
+                    end
+            end;
         false ->
             % Room doesn't exist, nothing changes
             io:format("[ERROR] [~p] Room '~s' doesn't exist~n", [?FUNCTION_NAME, RoomName]),
             Rooms
     end.
 
-% Returns the the room adding a new connected client
+% Returns the room adding a new connected client
 connect_client_to_room(Room, Client) ->
     % If the client is not a member of this room
     case not lists:member(Client, Room#room.clients) of 
@@ -270,6 +314,7 @@ send_message_to_room(Rooms, Clients, ClientSocket, Message, RoomName) ->
             io:format("[ERROR] [~p] Room '~s' doesn't exist~n", [?FUNCTION_NAME, RoomName])
     end.
 
+% Returns the room adding the newly invited client
 send_private_message(Clients, ClientSocket, Message, ClientName) ->
     Receiver = get_client_by_name(Clients, ClientName),
     % Checking if client exists
@@ -279,6 +324,44 @@ send_private_message(Clients, ClientSocket, Message, ClientName) ->
             gen_tcp:send(Receiver#client.socket, term_to_binary({private_message, {Sender#client.name, Message}}));
         false ->
             io:format("[ERROR] [~p] Client '~s' doesn't exist~n", [?FUNCTION_NAME, ClientName])
+    end.
+
+send_room_invite(Rooms, Clients, ClientSocket, RoomName, ClientName) ->
+    Room = get_room_by_name(Rooms, RoomName),
+    Client = get_client_from_socket(Clients, ClientSocket),
+    % Checking if room exists
+    case is_record(Room, room) of
+        true ->
+            % Checking if caller is the owner of the room
+            case Room#room.owner == Client#client.socket of
+                true ->
+                    % Checking if room is public or private
+                    case Room#room.type of
+                        private ->
+                            InvitedClient = get_client_by_name(Clients, ClientName),
+                            % Checking if client is not already invited
+                            case not lists:member(InvitedClient, Room#room.invited) of
+                                true ->
+                                    % Send message to client
+                                    gen_tcp:send(InvitedClient#client.socket, term_to_binary({private_room_invitation, {Client#client.name, RoomName}})),
+                                    % Add new room to list
+                                    NewRoom = Room#room{invited = [InvitedClient | Room#room.invited]},
+                                    [NewRoom | [R || R <- Rooms, R /= Room]];
+                                false ->
+                                    io:format("[ERROR] [~p] Client '~s' has already been invited to room '~s'~n", [?FUNCTION_NAME, Client#client.name, RoomName]),
+                                    Rooms
+                            end;
+                        public ->
+                            io:format("[ERROR] [~p] Clients cannot be invited to public rooms~n", [?FUNCTION_NAME]),
+                            Rooms
+                    end;
+                false ->
+                    io:format("[ERROR] [~p] Client '~s' is not the owner of room '~s'~n", [?FUNCTION_NAME, Client#client.name, RoomName]),
+                    Rooms
+            end;
+        false ->
+            io:format("[ERROR] [~p] Room '~s' doesn't exist~n", [?FUNCTION_NAME, RoomName]),
+            Rooms
     end.
 
 init(Arg) ->

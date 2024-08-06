@@ -54,3 +54,8 @@ This will connect some clients and create different rooms, testing various cases
 $ client_app:test_private_messages().
 ```
 This will connect some clients and send some private messages.
+- Test private rooms
+```
+$ client_app:test_private_rooms().
+```
+This will create one private and one public room, testing various cases.
