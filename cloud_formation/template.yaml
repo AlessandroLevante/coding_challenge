@@ -1,0 +1,16 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS CloudFormation Template for DynamoDB
+Resources:
+  Room:
+    Type: "AWS::DynamoDB::Table"
+    Properties:
+      TableName: "Room"
+      AttributeDefinitions:
+        - AttributeName: "name"
+          AttributeType: "S"
+      KeySchema:
+        - AttributeName: "name"
+          KeyType: "HASH"
+      ProvisionedThroughput:
+        ReadCapacityUnits: 5
+        WriteCapacityUnits: 5
