@@ -1,0 +1,57 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: AWS CloudFormation Template for EC2
+
+Resources:
+  ChatServer:
+    Type: AWS::EC2::Instance
+    Properties:
+      AvailabilityZone: eu-north-1a
+      ImageId: ami-07a0715df72e58928 # Ubuntu 22.04
+      InstanceType: t3.micro
+      SecurityGroups:
+        - !Ref SSHSecurityGroup
+        - !Ref ServerSecurityGroup
+      KeyName: ChatServer-CodingChallenge
+      UserData:
+        Fn::Base64: !Sub |
+          #!/bin/bash
+          sudo apt-get update
+          sudo apt-get --assume-yes install git rebar3
+          mkdir erl_kerl
+          cd erl_kerl
+          curl -O https://raw.githubusercontent.com/kerl/kerl/master/kerl
+          chmod a+x kerl
+          cd ..
+          export PATH=/erl_kerl:$PATH
+          kerl version
+          kerl upgrade
+          kerl build 25.3.2.13 25.3.2.13
+          kerl install 25.3.2.13 /.kerl/versions/25.3.2.13
+          kerl list installations
+          . /.kerl/versions/25.3.2.13/activate
+          mkdir github
+          cd github
+          git clone https://github.com/AlessandroLevante/coding_challenge.git
+          cd coding_challenge
+          rebar3 release
+          _build/default/rel/coding_challenge/bin/coding_challenge foreground
+
+  SSHSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable SSH access via port 22
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+
+  ServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable Server access via port 6789
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 6789
+          IpProtocol: tcp
+          ToPort: 6789

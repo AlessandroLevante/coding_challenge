@@ -1,4 +1,0 @@
-template-file-path: cloud_formation/template.yaml
-tags:
-Name: 'gitsync'
-Project: 'coding-challenge'
