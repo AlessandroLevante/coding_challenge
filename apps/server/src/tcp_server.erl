@@ -12,13 +12,26 @@
 
 % Records used
 -record(client, {name = "", socket}).
--record(room, {name = "", owner, type = public, clients = [], invited = []}).  
+-record(room, {name = "", owner = "", type = public, clients = [], invited = []}).
+
+% DynamoDB table names
+-define(ROOM_TABLE, <<"Room">>).
 
 % LPort -> Listening port of the server
 start_link(LPort) ->
     gen_server:start_link({local, ?MODULE}, ?MODULE, [], []),
+    % Configuring DynamoDB
+    erlcloud_ddb2:configure(
+        "FAKEKEY",
+        "FAKEPASS",
+        "localhost",
+        9000,
+        "http://"
+    ),
+    % Getting previously saved rooms
+    Rooms = get_rooms_from_ddb(),
     % This thread will manage requests for data shared between the clients
-    RecvThreadPid = spawn(?MODULE, receiving_thread, [[], []]),
+    RecvThreadPid = spawn(?MODULE, receiving_thread, [[], Rooms]),
     io:format("TCP server started~n"),
     case gen_tcp:listen(LPort, [binary, {active, false},{packet, 2}]) of
         {ok, ListenSock} ->
@@ -30,10 +43,18 @@ start_link(LPort) ->
 loop_accept(ListenSock, RecvThreadPid) ->
     {ok, Sock} = gen_tcp:accept(ListenSock),
     % This thread gets spawned for every client connections, manages requests
-    ClientPid = spawn(?MODULE, loop, [Sock, RecvThreadPid]),
+    spawn(?MODULE, loop, [Sock, RecvThreadPid]),
     loop_accept(ListenSock, RecvThreadPid).
 
 receiving_thread(Clients, Rooms) ->
+    % Configuring DynamoDB again, since this method gets executed in another thread
+    erlcloud_ddb2:configure(
+        "FAKEKEY",
+        "FAKEPASS",
+        "localhost",
+        9000,
+        "http://"
+    ),
     receive
         {add_client, ClientSocket, ClientName} ->
             Client = #client{name = ClientName, socket = ClientSocket},
@@ -43,8 +64,7 @@ receiving_thread(Clients, Rooms) ->
         {create_room, ClientSocket, RoomName} ->
             receiving_thread(Clients, create_room(Rooms, Clients, ClientSocket, RoomName));
         {destroy_room, ClientSocket, RoomName} ->
-            io:format("Trying to remove room '~s'...~n", [RoomName]),
-            receiving_thread(Clients, remove_room(Rooms, RoomName, ClientSocket));
+            receiving_thread(Clients, remove_room(Rooms, Clients, RoomName, ClientSocket));
         {list_rooms, ClientSocket, ClientPid} ->
             % Send message back with rooms list
             ClientPid ! {list_rooms, get_rooms_list(Clients, Rooms, ClientSocket)};
@@ -117,7 +137,7 @@ loop(Sock, ServerPid) ->
                     ServerPid ! {send_room_invite, Sock, RoomName, ClientName}
             end,
             loop(Sock, ServerPid);
-        {error, Reason} ->
+        {error, _} ->
             ok
     end.
 
@@ -136,19 +156,132 @@ print_rooms_and_participants(Rooms) ->
 print_room_participants(Rooms, RoomName) ->
     Room = get_room_by_name(Rooms, RoomName),
     io:format("~s participants:~n", [Room#room.name]),
-    [io:format(" - ~s~n", [Client#client.name]) || Client <- Room#room.clients].
+    [io:format(" - ~s~n", [Client]) || Client <- Room#room.clients].
 
 print_room_participants(Room) ->
     io:format("~s participants:~n", [Room#room.name]),
-    [io:format(" - ~s~n", [Client#client.name]) || Client <- Room#room.clients].
+    [io:format(" - ~s~n", [Client]) || Client <- Room#room.clients].
 
+% --- DynamoDB methods ---
+% -- Get data from DynamoDB --
+get_rooms_from_ddb() ->
+    Result = erlcloud_ddb_util:scan_all(?ROOM_TABLE),
+    case Result of
+        {ok, Items} ->
+            lists:map(fun map_ddb_item_to_room/1, Items);
+        {error, _} ->
+            []
+    end.
+
+get_messages_from_ddb(Room) ->
+    Result = erlcloud_ddb2:get_item(?ROOM_TABLE, get_key(Room)),
+    case Result of
+        {ok, Items} ->
+            map_ddb_item_to_messages(Items);
+        {error, _} ->
+            []
+    end.
+
+% Adds a room in room table on DynamoDB
+add_room_ddb(Room) ->
+    Items = map_room_to_ddb_items(Room),
+    erlcloud_ddb2:put_item(?ROOM_TABLE, Items).
+
+% Adds a message in a room in room table on DynamoDB
+add_room_message_ddb(Room, Sender, Message) ->
+    PreviousMessages = get_messages_from_ddb(Room),
+    Items = map_message_to_ddb_items(Sender, Message, PreviousMessages),
+    erlcloud_ddb2:update_item(?ROOM_TABLE, get_key(Room), Items).
+
+% Updates a room in room table on DynamoDB
+update_room_ddb(Room) ->
+    Items = map_room_to_ddb_items_update(Room),
+    erlcloud_ddb2:update_item(?ROOM_TABLE, get_key(Room), Items).
+
+% Deletes a room from room table on DynamoDB
+delete_room_ddb(Room) ->
+    erlcloud_ddb2:delete_item(?ROOM_TABLE, get_key(Room)).
+
+% -- DynamoDB utilities --
+% Gets the key (name) for Room table
+get_key(Room) ->
+    [ {<<"name">>, {s, list_to_binary(Room#room.name)}} ].
+
+% -- Map data from and to DynamoDB --
+map_ddb_item_to_room(Items) ->
+    Name = binary_to_list(proplists:get_value(<<"name">>, Items)),
+    Owner = binary_to_list(proplists:get_value(<<"owner">>, Items)),
+    Type = binary_to_atom(proplists:get_value(<<"type">>, Items)),
+    Clients = [binary_to_list(Client) || Client <- proplists:get_value(<<"clients">>, Items)],
+    
+    case Type of
+        public ->
+            #room{name = Name, owner = Owner, type = Type, clients = Clients, invited = []};
+        private ->
+            Invited = [binary_to_list(Client) || Client <- proplists:get_value(<<"invited">>, Items)],
+            #room{name = Name, owner = Owner, type = Type, clients = Clients, invited = Invited}
+    end.
+
+map_ddb_item_to_messages(Items) ->
+    case proplists:is_defined(<<"messages">>, Items) of
+        true ->
+            [binary_to_term(Message) || Message <- proplists:get_value(<<"messages">>, Items)];
+        false ->
+            []
+    end.
+
+map_room_to_ddb_items(Room) ->
+    case Room#room.type of
+        public ->
+            [
+                {<<"name">>, list_to_binary(Room#room.name)},
+                {<<"owner">>, list_to_binary(Room#room.owner)},
+                {<<"type">>, {b, atom_to_binary(Room#room.type)}},
+                {<<"clients">>, {ss, [list_to_binary(Client) || Client <- Room#room.clients]}}
+            ];
+        private ->
+            [
+                {<<"name">>, list_to_binary(Room#room.name)},
+                {<<"owner">>, list_to_binary(Room#room.owner)},
+                {<<"type">>, {b, atom_to_binary(Room#room.type)}},
+                {<<"clients">>, {ss, [list_to_binary(Client) || Client <- Room#room.clients]}},
+                {<<"invited">>, {ss, [list_to_binary(Client) || Client <- Room#room.invited]}}
+            ]
+    end.
+
+map_room_to_ddb_items_update(Room) ->
+    case Room#room.type of
+        public ->
+            [
+                {<<"owner">>, list_to_binary(Room#room.owner), put},
+                {<<"type">>, {b, atom_to_binary(Room#room.type)}, put},
+                {<<"clients">>, {ss, [list_to_binary(Client) || Client <- Room#room.clients]}, put}
+            ];
+        private ->
+            [
+                {<<"owner">>, list_to_binary(Room#room.owner), put},
+                {<<"type">>, {b, atom_to_binary(Room#room.type)}, put},
+                {<<"clients">>, {ss, [list_to_binary(Client) || Client <- Room#room.clients]}, put},
+                {<<"invited">>, {ss, [list_to_binary(Client) || Client <- Room#room.invited]}, put}
+            ]
+    end.
+
+map_message_to_ddb_items(Sender, Message, PreviousMessages) ->
+    Messages = [{Sender, Message} | PreviousMessages],
+    [
+        {<<"messages">>, {bs, [term_to_binary(MessageToMap) || MessageToMap <- Messages]}, put}
+    ].
+
+% --- End DynamoDB methods ---
+
+% -- Utility methods for managing records --
 % Filters Rooms list, maintaining only entries with the passed name
 % Returns first element of the filtered list
 get_room_by_name(Rooms, RoomName) ->
     % Check if room exists
     case lists:any(fun(Room) -> Room#room.name == RoomName end, Rooms) of
         true -> 
-            [Room | Rest] = lists:filter(fun(Room) -> Room#room.name == RoomName end, Rooms),
+            [Room | _] = lists:filter(fun(Room) -> Room#room.name == RoomName end, Rooms),
             Room;
         false -> ok
     end.
@@ -159,16 +292,18 @@ get_client_from_socket(Clients, ClientSocket) ->
     % Check if client is connected
     case lists:any(fun(Client) -> Client#client.socket == ClientSocket end, Clients) of
         true -> 
-            [Client | Rest] = lists:filter(fun(Client) -> Client#client.socket == ClientSocket end, Clients),
+            [Client | _] = lists:filter(fun(Client) -> Client#client.socket == ClientSocket end, Clients),
             Client;
         false -> io:format("[ERROR] [~p] This client is not connected~n", [?FUNCTION_NAME])
     end.
 
+% Filters Clients list, maintaining only entries with the passed name
+% Returns first element of the filtered list
 get_client_by_name(Clients, ClientName) ->
     % Check if a client with this name exists
     case lists:any(fun(Client) -> Client#client.name == ClientName end, Clients) of
         true -> 
-            [Client | Rest] = lists:filter(fun(Client) -> Client#client.name == ClientName end, Clients),
+            [Client | _] = lists:filter(fun(Client) -> Client#client.name == ClientName end, Clients),
             Client;
         false -> ok
     end.
@@ -178,11 +313,21 @@ create_room(Rooms, Clients, ClientSocket, RoomName) ->
     % Checking if room already exist
     ExistingRoom = get_room_by_name(Rooms, RoomName),
     case not is_record(ExistingRoom, room) of
-        true -> 
-            Room = #room{name = RoomName, owner = ClientSocket, clients = [get_client_from_socket(Clients, ClientSocket)]},
-            io:format("Created room '~s'~n", [RoomName]),
-            % Adding new room to rooms list
-            [Room | Rooms];
+        true ->
+            Client = get_client_from_socket(Clients, ClientSocket),
+            Room = #room{name = RoomName, owner = Client#client.name, clients = [Client#client.name]},
+            Response = add_room_ddb(Room),
+            case Response of
+                {ok, _} ->
+                    io:format("Created room '~s'~n", [RoomName]),
+                    % Adding new room to rooms list
+                    [Room | Rooms];
+                {error, Error} ->
+                    ErrorWhere = element(1, Error),
+                    ErrorType = element(2, Error),
+                    io:format("[ERROR] [~p] Some error occured while adding new room to DynamoDB: ~s - ~s~n", [?FUNCTION_NAME, ErrorWhere, ErrorType]),
+                    Rooms
+            end;
         false ->
             % If ExistingRoom is not a record it means a room with the passed name doesn't exist
             io:format("[ERROR] [~p] Room '~s' already exists~n", [?FUNCTION_NAME, RoomName]),
@@ -195,10 +340,20 @@ create_private_room(Rooms, Clients, ClientSocket, RoomName) ->
     ExistingRoom = get_room_by_name(Rooms, RoomName),
     case not is_record(ExistingRoom, room) of
         true -> 
-            Room = #room{name = RoomName, owner = ClientSocket, type = private, clients = [get_client_from_socket(Clients, ClientSocket)], invited = [get_client_from_socket(Clients, ClientSocket)]},
-            io:format("Created private room '~s'~n", [RoomName]),
-            % Adding new room to rooms list
-            [Room | Rooms];
+            Client = get_client_from_socket(Clients, ClientSocket),
+            Room = #room{name = RoomName, owner = Client#client.name, type = private, clients = [Client#client.name], invited = [Client#client.name]},
+            Response = add_room_ddb(Room),
+            case Response of
+                {ok, _} ->
+                    io:format("Created private room '~s'~n", [RoomName]),
+                    % Adding new room to rooms list
+                    [Room | Rooms];
+                {error, Error} ->
+                    ErrorWhere = element(1, Error),
+                    ErrorType = element(2, Error),
+                    io:format("[ERROR] [~p] Some error occured while adding new room to DynamoDB: ~s - ~s~n", [?FUNCTION_NAME, ErrorWhere, ErrorType]),
+                    Rooms
+            end;
         false ->
             % If ExistingRoom is not a record it means a room with the passed name doesn't exist
             io:format("[ERROR] [~p] Room '~s' already exists~n", [?FUNCTION_NAME, RoomName]),
@@ -207,19 +362,37 @@ create_private_room(Rooms, Clients, ClientSocket, RoomName) ->
 
 % Returns true if room must be removed
 % Room must be removed if passed name is related to a room owned by the caller
-should_room_be_removed(Room, RoomName, ClientSocket) ->
-    (Room#room.owner == ClientSocket) andalso (Room#room.name == RoomName).
+should_room_be_removed(Room, RoomName, Owner) ->
+    (Room#room.owner == Owner) andalso (Room#room.name == RoomName).
 
 % Returns the list of rooms without the rooms that got removed
-remove_room(Rooms, RoomName, ClientSocket) ->
-    % Filter creates a list with the elements that respect the given condition,
-    % so rooms that should not be removed will be in NewRooms list
-    NewRooms = lists:filter(fun(Room) -> not should_room_be_removed(Room, RoomName, ClientSocket) end, Rooms).
+remove_room(Rooms, Clients, RoomName, ClientSocket) ->
+    Client = get_client_from_socket(Clients, ClientSocket),
+    case lists:any(fun(Room) -> should_room_be_removed(Room, RoomName, Client#client.name) end, Rooms) of
+        true ->
+            Room = get_room_by_name(Rooms, RoomName),
+            Response = delete_room_ddb(Room),
+            case Response of
+                {ok, _} ->
+                    io:format("Removed room '~s'~n", [RoomName]),
+                    % Filter creates a list with the elements that respect the given condition,
+                    % so rooms that should not be removed will be returned
+                    lists:filter(fun(RoomToRemove) -> not should_room_be_removed(RoomToRemove, RoomName, Client#client.name) end, Rooms);
+                {error, Error} ->
+                    ErrorWhere = element(1, Error),
+                    ErrorType = element(2, Error),
+                    io:format("[ERROR] [~p] Some error occured while adding new room to DynamoDB: ~s - ~s~n", [?FUNCTION_NAME, ErrorWhere, ErrorType]),
+                    Rooms
+            end;
+        false ->
+            io:format("[ERROR] [~p] Error removing room ~s~n", [?FUNCTION_NAME, RoomName]),
+            Rooms
+    end.
 
 % Returns a list containing only the rooms' names
 get_rooms_list(Clients, Rooms, ClientSocket) ->
     Client = get_client_from_socket(Clients, ClientSocket),
-    [Room#room.name || Room <- Rooms, (Room#room.type == public) or ((Room#room.type == private) and (lists:member(Client, Room#room.invited)))].
+    [Room#room.name || Room <- Rooms, (Room#room.type == public) or ((Room#room.type == private) and (lists:member(Client#client.name, Room#room.invited)))].
 
 % Returns the list of rooms, adding the client that wants to connect to the room
 add_client_to_room(Rooms, Clients, ClientSocket, RoomName) ->
@@ -232,13 +405,24 @@ add_client_to_room(Rooms, Clients, ClientSocket, RoomName) ->
             case Room#room.type of
                 public ->
                     NewRoom = connect_client_to_room(Room, Client),
-                    % Creating new list that contains all rooms different from Room, adding NewRoom
-                    % Basically we are replacing Room with NewRoom
-                    [NewRoom | [R || R <- Rooms, R /= Room]];
+                    Response = update_room_ddb(NewRoom),
+                    case Response of
+                        {ok, _} ->
+                            send_previous_messages(Client, NewRoom),
+                            % Creating new list that contains all rooms different from Room, adding NewRoom
+                            % Basically we are replacing Room with NewRoom
+                            [NewRoom | [R || R <- Rooms, R /= Room]];
+                        {error, Error} ->
+                            ErrorWhere = element(1, Error),
+                            ErrorType = element(2, Error),
+                            io:format("[ERROR] [~p] Some error occured while updating room on DynamoDB: ~s - ~s~n", [?FUNCTION_NAME, ErrorWhere, ErrorType]),
+                            Rooms
+                    end;
                 private ->
-                    case lists:member(Client, Room#room.invited) of
+                    case lists:member(Client#client.name, Room#room.invited) of
                         true ->
                             NewRoom = connect_client_to_room(Room, Client),
+                            send_previous_messages(Client, NewRoom),
                             % Creating new list that contains all rooms different from Room, adding NewRoom
                             % Basically we are replacing Room with NewRoom
                             [NewRoom | [R || R <- Rooms, R /= Room]];
@@ -256,11 +440,11 @@ add_client_to_room(Rooms, Clients, ClientSocket, RoomName) ->
 % Returns the room adding a new connected client
 connect_client_to_room(Room, Client) ->
     % If the client is not a member of this room
-    case not lists:member(Client, Room#room.clients) of 
+    case not lists:member(Client#client.name, Room#room.clients) of 
         true ->
             io:format("Added client '~s' to room '~s'~n", [Client#client.name, Room#room.name]),
             % Updating room clients
-            Room#room{clients = [Client | Room#room.clients]};
+            Room#room{clients = [Client#client.name | Room#room.clients]};
         false ->
             io:format("[ERROR] [~p] Client '~s' is already in room '~s'~n", [?FUNCTION_NAME, Client#client.name, Room#room.name]),
             Room
@@ -274,9 +458,18 @@ remove_client_from_room(Rooms, Clients, ClientSocket, RoomName) ->
         true -> 
             Client = get_client_from_socket(Clients, ClientSocket),
             NewRoom = disconnect_client_from_room(Room, Client),
-            % Creating new list that contains all rooms different from Room, adding NewRoom
-            % Basically we are replacing Room with NewRoom
-            [NewRoom | [R || R <- Rooms, R /= Room]];
+            Response = update_room_ddb(NewRoom),
+            case Response of
+                {ok, _} ->
+                    % Creating new list that contains all rooms different from Room, adding NewRoom
+                    % Basically we are replacing Room with NewRoom
+                    [NewRoom | [R || R <- Rooms, R /= Room]];
+                {error, Error} ->
+                    ErrorWhere = element(1, Error),
+                    ErrorType = element(2, Error),
+                    io:format("[ERROR] [~p] Some error occured while updating room on DynamoDB: ~s - ~s~n", [?FUNCTION_NAME, ErrorWhere, ErrorType]),
+                    Rooms
+            end;
         false ->
             % Room doesn't exist, nothing changes
             io:format("[ERROR] [~p] Room '~s' doesn't exist~n", [?FUNCTION_NAME, RoomName]),
@@ -286,10 +479,10 @@ remove_client_from_room(Rooms, Clients, ClientSocket, RoomName) ->
 % Returns the the room deleting the disconnected client
 disconnect_client_from_room(Room, Client) ->
     % If the client is a member of this room
-    case lists:member(Client, Room#room.clients) of 
+    case lists:member(Client#client.name, Room#room.clients) of 
         true ->
             io:format("Removing client '~s' from room '~s'~n", [Client#client.name, Room#room.name]),
-            Room#room{clients = lists:delete(Client, Room#room.clients)};
+            Room#room{clients = lists:delete(Client#client.name, Room#room.clients)};
         false ->
             % Client is not part of the room, nothing changes
             io:format("[ERROR] [~p] Client '~s' is not part of the room '~s'~n", [?FUNCTION_NAME, Client#client.name, Room#room.name]),
@@ -303,10 +496,12 @@ send_message_to_room(Rooms, Clients, ClientSocket, Message, RoomName) ->
         true ->
             Client = get_client_from_socket(Clients, ClientSocket),
             % If the client is a member of this room
-            case lists:member(Client, Room#room.clients) of
+            case lists:member(Client#client.name, Room#room.clients) of
                 true ->
                     % Sends the message to every room participant
-                    [gen_tcp:send(RoomParticipant#client.socket, term_to_binary({room_message, {Client#client.name, Room#room.name, Message}})) || RoomParticipant <- Room#room.clients];
+                    ClientsToSend = [get_client_by_name(Clients, RoomParticipant) || RoomParticipant <- Room#room.clients],
+                    add_room_message_ddb(Room, Client#client.name, Message),
+                    [gen_tcp:send(ClientToSend#client.socket, term_to_binary({room_message, {Client#client.name, Room#room.name, Message}})) || ClientToSend <- ClientsToSend];
                 false ->
                     io:format("[ERROR] [~p] Client '~s' is not part of the room '~s'~n", [?FUNCTION_NAME, Client#client.name, Room#room.name])
             end;
@@ -326,6 +521,10 @@ send_private_message(Clients, ClientSocket, Message, ClientName) ->
             io:format("[ERROR] [~p] Client '~s' doesn't exist~n", [?FUNCTION_NAME, ClientName])
     end.
 
+send_previous_messages(Client, Room) ->
+    Messages = get_messages_from_ddb(Room),
+    [gen_tcp:send(Client#client.socket, term_to_binary({room_message, {element(1, Message), Room#room.name, element(2, Message)}})) || Message <- Messages].
+
 send_room_invite(Rooms, Clients, ClientSocket, RoomName, ClientName) ->
     Room = get_room_by_name(Rooms, RoomName),
     Client = get_client_from_socket(Clients, ClientSocket),
@@ -333,22 +532,38 @@ send_room_invite(Rooms, Clients, ClientSocket, RoomName, ClientName) ->
     case is_record(Room, room) of
         true ->
             % Checking if caller is the owner of the room
-            case Room#room.owner == Client#client.socket of
+            case Room#room.owner == Client#client.name of
                 true ->
                     % Checking if room is public or private
                     case Room#room.type of
                         private ->
                             InvitedClient = get_client_by_name(Clients, ClientName),
-                            % Checking if client is not already invited
-                            case not lists:member(InvitedClient, Room#room.invited) of
+                            case is_record(InvitedClient, client) of
                                 true ->
-                                    % Send message to client
-                                    gen_tcp:send(InvitedClient#client.socket, term_to_binary({private_room_invitation, {Client#client.name, RoomName}})),
-                                    % Add new room to list
-                                    NewRoom = Room#room{invited = [InvitedClient | Room#room.invited]},
-                                    [NewRoom | [R || R <- Rooms, R /= Room]];
+                                    % Checking if client is not already invited
+                                    case not lists:member(InvitedClient#client.name, Room#room.invited) of
+                                        true ->
+                                            % Send message to client
+                                            gen_tcp:send(InvitedClient#client.socket, term_to_binary({private_room_invitation, {Client#client.name, RoomName}})),
+                                            NewRoom = Room#room{invited = [InvitedClient#client.name | Room#room.invited]},
+                                            Response = update_room_ddb(NewRoom),
+                                            case Response of
+                                                {ok, _} ->
+                                                    % Add new room to list
+                                                    [NewRoom | [R || R <- Rooms, R /= Room]];
+                                                {error, Error} ->
+                                                    ErrorWhere = element(1, Error),
+                                                    ErrorType = element(2, Error),
+                                                    io:format("[ERROR] [~p] Some error occured while updating room on DynamoDB: ~s - ~s~n", [?FUNCTION_NAME, ErrorWhere, ErrorType]),
+                                                    Rooms
+                                            end;
+                                            
+                                        false ->
+                                            io:format("[ERROR] [~p] Client '~s' has already been invited to room '~s'~n", [?FUNCTION_NAME, Client#client.name, RoomName]),
+                                            Rooms
+                                    end;
                                 false ->
-                                    io:format("[ERROR] [~p] Client '~s' has already been invited to room '~s'~n", [?FUNCTION_NAME, Client#client.name, RoomName]),
+                                    io:format("[ERROR] [~p] Client '~s' doesn't exist~n", [?FUNCTION_NAME, Client#client.name]),
                                     Rooms
                             end;
                         public ->
@@ -364,7 +579,7 @@ send_room_invite(Rooms, Clients, ClientSocket, RoomName, ClientName) ->
             Rooms
     end.
 
-init(Arg) ->
+init(_) ->
     process_flag(trap_exit, true),
     {ok, {}}.
 

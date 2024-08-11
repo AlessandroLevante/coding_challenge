@@ -8,21 +8,19 @@ Here are the instructions to run this application.
 ## Prerequisites
 [Erlang/OTP25](https://www.erlang.org/downloads/25) and [rebar3](https://rebar3.org) must be installed on your machine to build and run this application.
 
+## Third-Party Libraries
+- [erlcloud](https://github.com/erlcloud/erlcloud): used to connect to DynamoDB and interact with it, using methods to add, update or remove data from tables.
+
 ## Run the server application
 
-- Go into the <code>apps/server</code> folder
-- From a terminal, run the command:
+- Open a terminal inside this project's base folder, then run the command:
 ```
 $ rebar3 shell
-```
-- Then, run the command:
-```
-$ application:start(server).
 ```
 
 ## Release and run project
 
-- From a terminal, run the command:
+- Open a terminal inside this project's base folder, then run the command:
 ```
 $ rebar3 release
 ```
@@ -59,3 +57,6 @@ This will connect some clients and send some private messages.
 $ client_app:test_private_rooms().
 ```
 This will create one private and one public room, testing various cases.
+
+There are various other useful methods to test the single functions, like creating a room, joining a room, sending a message, etc.
+To use one of those methods, check the source code inside the client_app.erl file, from there you can see the exported methods you can use for testing purposes.
