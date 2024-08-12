@@ -1,0 +1,6 @@
+syntax = "proto3";
+
+message RoomInvitation {
+    string sender = 1;
+    string roomName = 2;
+}

@@ -1,0 +1,29 @@
+syntax = "proto3";
+
+import "action_pb.proto";
+import "client_pb.proto";
+import "room_pb.proto";
+import "invite_to_room_pb.proto";
+import "send_msg_to_room_pb.proto";
+import "send_private_msg_pb.proto";
+
+import "rooms_list_pb.proto";
+import "room_message_pb.proto";
+import "private_message_pb.proto";
+import "room_invitation_pb.proto";
+
+message ServerMessage {
+    Action action = 1;
+    oneof payload {
+        Client client = 2; // Actions: ADD_CLIENT
+        Room room = 3; // Actions: CREATE_ROOM, DESTROY_ROOM, JOIN_ROOM, LEAVE_ROOM, CREATE_PRIVATE_ROOM
+        SendMessageToRoom msgToRoom = 4; // Actions: SEND_MSG_ROOM
+        SendPrivateMessage sendPrivateMsg = 5; // Actions: SEND_PRIVATE_MESSAGE
+        InviteToRoom invite = 6; // Actions: SEND_ROOM_INVITE
+
+        RoomsList rooms = 7; // Actions: LIST_ROOMS
+        RoomMessage roomMsg = 8; // Actions: ROOM_MESSAGE
+        PrivateMessage privateMsg = 9; // Actions: PRIVATE_MESSAGE
+        RoomInvitation roomInvitation = 10; // Actions: ROOM_INVITATION
+    }
+}

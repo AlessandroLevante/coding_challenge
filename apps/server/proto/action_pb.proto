@@ -1,0 +1,20 @@
+syntax = "proto3";
+
+enum Action {
+    // TO SERVER
+    ADD_CLIENT = 0;
+    CREATE_ROOM = 1;
+    DESTROY_ROOM = 2;
+    JOIN_ROOM = 3;
+    LEAVE_ROOM = 4;
+    SEND_MSG_ROOM = 5;
+    SEND_PRIVATE_MESSAGE = 6;
+    CREATE_PRIVATE_ROOM = 7;
+    SEND_ROOM_INVITE = 8;
+
+    // FROM SERVER
+    LIST_ROOMS = 9;
+    ROOM_MESSAGE = 10;
+    PRIVATE_MESSAGE = 11;
+    ROOM_INVITATION = 12;
+}

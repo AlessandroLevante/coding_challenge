@@ -1,0 +1,8 @@
+syntax = "proto3";
+
+import "client_pb.proto";
+
+message Room {
+    string name = 1;
+    repeated Client clients = 2;
+}

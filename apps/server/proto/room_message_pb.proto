@@ -1,0 +1,7 @@
+syntax = "proto3";
+
+message RoomMessage {
+    string sender = 1;
+    string roomName = 2;
+    string message = 3;
+}

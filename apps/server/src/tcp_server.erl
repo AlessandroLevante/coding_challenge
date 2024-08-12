@@ -10,6 +10,8 @@
 -export([start_link/1]).
 -export([loop/2, receiving_thread/2, init/1, handle_cast/2]).
 
+-include("server_message_pb.hrl").
+
 % Records used
 -record(client, {name = "", socket}).
 -record(room, {name = "", owner = "", type = public, clients = [], invited = []}).
@@ -87,53 +89,66 @@ loop(Sock, ServerPid) ->
     case gen_tcp:recv(Sock, 0) of
         {ok, Packet} ->
             % Packet is a tuple, first element is the Type of request, the second is the Payload
-            Tuple = binary_to_term(Packet),
-            Type = element(1, Tuple),
-            Payload = element(2, Tuple),
+            %Tuple = binary_to_term(Packet),
+            %Type = element(1, Tuple),
+            %Payload = element(2, Tuple),
 
-            case Type of
-                connection ->
-                    % Payload is client name
-                    ServerPid ! {add_client, Sock, Payload};
-                create_room ->
-                    % Payload is room name
-                    ServerPid ! {create_room, Sock, Payload};
-                destroy_room ->
-                    % Payload is room name
-                    ServerPid ! {destroy_room, Sock, Payload};
-                list_rooms ->
+            % Packet is a protobuf encoded msg
+            ServerMessage = server_message_pb:decode_msg(Packet, 'ServerMessage'),
+
+            case ServerMessage#'ServerMessage'.action of
+                'ADD_CLIENT' ->
+                    % Payload is client
+                    ClientProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    ServerPid ! {add_client, Sock, ClientProto#'Client'.name};
+                'CREATE_ROOM' ->
+                    % Payload is room
+                    RoomProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    ServerPid ! {create_room, Sock, RoomProto#'Room'.name};
+                'DESTROY_ROOM' ->
+                    % Payload is room
+                    RoomProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    ServerPid ! {destroy_room, Sock, RoomProto#'Room'.name};
+                'LIST_ROOMS' ->
                     % Empty payload
                     % Passing this thread's pid to receive the list back
                     ServerPid ! {list_rooms, Sock, self()},
                     % Waiting to receive list
                     receive
                         {list_rooms, Rooms} ->
+                            ListRoomsSvrMsg = #'ServerMessage'{action = 'LIST_ROOMS', payload = {rooms, #'RoomsList'{rooms = Rooms}}},
                             % Sending list of available rooms to client
-                            gen_tcp:send(Sock, term_to_binary({list_rooms, Rooms}))
+                            gen_tcp:send(Sock, server_message_pb:encode_msg(ListRoomsSvrMsg))
                     end;
-                join_room ->
-                    % Payload is room name
-                    ServerPid ! {join_room, Sock, Payload};
-                leave_room ->
-                    % Payload is room name
-                    ServerPid ! {leave_room, Sock, Payload};
-                send_msg_room ->
-                    % Payload is a tuple containing room name and message to send
-                    RoomName = element(1, Payload),
-                    Message = element(2, Payload),
+                'JOIN_ROOM' ->
+                    % Payload is room
+                    RoomProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    ServerPid ! {join_room, Sock, RoomProto#'Room'.name};
+                'LEAVE_ROOM' ->
+                    % Payload is room
+                    RoomProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    ServerPid ! {leave_room, Sock, RoomProto#'Room'.name};
+                'SEND_MSG_ROOM' ->
+                    % Payload contains room and message to send
+                    SendMsgRoomProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    RoomName = SendMsgRoomProto#'SendMessageToRoom'.room#'Room'.name,
+                    Message = SendMsgRoomProto#'SendMessageToRoom'.message,
                     ServerPid ! {send_msg_room, Sock, RoomName, Message};
-                private_message ->
-                    % Payload is a tuple containing client name and message to send
-                    ClientName = element(1, Payload),
-                    Message = element(2, Payload),
+                'SEND_PRIVATE_MESSAGE' ->
+                    % Payload contains client and message to send
+                    PrivateMsgProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    ClientName = PrivateMsgProto#'SendPrivateMessage'.client#'Client'.name,
+                    Message = PrivateMsgProto#'SendPrivateMessage'.message,
                     ServerPid ! {private_message, Sock, ClientName, Message};
-                create_private_room ->
-                    % Payload is room name
-                    ServerPid ! {create_private_room, Sock, Payload};
-                send_room_invite ->
-                    % Payload is tuple containing room name and client name
-                    RoomName = element(1, Payload),
-                    ClientName = element(2, Payload),
+                'CREATE_PRIVATE_ROOM' ->
+                    % Payload is room
+                    RoomProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    ServerPid ! {create_private_room, Sock, RoomProto#'Room'.name};
+                'SEND_ROOM_INVITE' ->
+                    % Payload contains room and client
+                    RoomInviteProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    RoomName = RoomInviteProto#'InviteToRoom'.room#'Room'.name,
+                    ClientName = RoomInviteProto#'InviteToRoom'.client#'Client'.name,
                     ServerPid ! {send_room_invite, Sock, RoomName, ClientName}
             end,
             loop(Sock, ServerPid);
@@ -389,10 +404,13 @@ remove_room(Rooms, Clients, RoomName, ClientSocket) ->
             Rooms
     end.
 
-% Returns a list containing only the rooms' names
+get_clients_room(Room) ->
+    [#'Client'{name = Client} || Client <- Room#room.clients].
+
+% Returns a list containing only rooms to send to client
 get_rooms_list(Clients, Rooms, ClientSocket) ->
     Client = get_client_from_socket(Clients, ClientSocket),
-    [Room#room.name || Room <- Rooms, (Room#room.type == public) or ((Room#room.type == private) and (lists:member(Client#client.name, Room#room.invited)))].
+    [#'Room'{name = Room#room.name, clients = get_clients_room(Room)} || Room <- Rooms, (Room#room.type == public) or ((Room#room.type == private) and (lists:member(Client#client.name, Room#room.invited)))].
 
 % Returns the list of rooms, adding the client that wants to connect to the room
 add_client_to_room(Rooms, Clients, ClientSocket, RoomName) ->
@@ -489,6 +507,9 @@ disconnect_client_from_room(Room, Client) ->
             Room
     end.
 
+create_message_to_room_proto_record(Sender, RoomName, Message) ->
+    #'ServerMessage'{action = 'ROOM_MESSAGE', payload = {roomMsg, #'RoomMessage'{sender = Sender, roomName = RoomName, message = Message}}}.
+
 send_message_to_room(Rooms, Clients, ClientSocket, Message, RoomName) ->
     Room = get_room_by_name(Rooms, RoomName),
     % Checking if room exists
@@ -500,8 +521,9 @@ send_message_to_room(Rooms, Clients, ClientSocket, Message, RoomName) ->
                 true ->
                     % Sends the message to every room participant
                     ClientsToSend = [get_client_by_name(Clients, RoomParticipant) || RoomParticipant <- Room#room.clients],
+                    ServerMessage = create_message_to_room_proto_record(Client#client.name, Room#room.name, Message),
                     add_room_message_ddb(Room, Client#client.name, Message),
-                    [gen_tcp:send(ClientToSend#client.socket, term_to_binary({room_message, {Client#client.name, Room#room.name, Message}})) || ClientToSend <- ClientsToSend];
+                    [gen_tcp:send(ClientToSend#client.socket, server_message_pb:encode_msg(ServerMessage)) || ClientToSend <- ClientsToSend];
                 false ->
                     io:format("[ERROR] [~p] Client '~s' is not part of the room '~s'~n", [?FUNCTION_NAME, Client#client.name, Room#room.name])
             end;
@@ -516,14 +538,15 @@ send_private_message(Clients, ClientSocket, Message, ClientName) ->
     case is_record(Receiver, client) of
         true ->
             Sender = get_client_from_socket(Clients, ClientSocket),
-            gen_tcp:send(Receiver#client.socket, term_to_binary({private_message, {Sender#client.name, Message}}));
+            ServerMessage = #'ServerMessage'{action = 'PRIVATE_MESSAGE', payload = {privateMsg, #'PrivateMessage'{sender = Sender#client.name, message = Message}}},
+            gen_tcp:send(Receiver#client.socket, server_message_pb:encode_msg(ServerMessage));
         false ->
             io:format("[ERROR] [~p] Client '~s' doesn't exist~n", [?FUNCTION_NAME, ClientName])
     end.
 
 send_previous_messages(Client, Room) ->
     Messages = get_messages_from_ddb(Room),
-    [gen_tcp:send(Client#client.socket, term_to_binary({room_message, {element(1, Message), Room#room.name, element(2, Message)}})) || Message <- Messages].
+    [gen_tcp:send(Client#client.socket, server_message_pb:encode_msg(create_message_to_room_proto_record(element(1, Message), Room#room.name, element(2, Message)))) || Message <- Messages].
 
 send_room_invite(Rooms, Clients, ClientSocket, RoomName, ClientName) ->
     Room = get_room_by_name(Rooms, RoomName),
@@ -544,7 +567,8 @@ send_room_invite(Rooms, Clients, ClientSocket, RoomName, ClientName) ->
                                     case not lists:member(InvitedClient#client.name, Room#room.invited) of
                                         true ->
                                             % Send message to client
-                                            gen_tcp:send(InvitedClient#client.socket, term_to_binary({private_room_invitation, {Client#client.name, RoomName}})),
+                                            ServerMessage = #'ServerMessage'{action = 'ROOM_INVITATION', payload = {roomInvitation, #'RoomInvitation'{sender = Client#client.name, roomName = RoomName}}},
+                                            gen_tcp:send(InvitedClient#client.socket, server_message_pb:encode_msg(ServerMessage)),
                                             NewRoom = Room#room{invited = [InvitedClient#client.name | Room#room.invited]},
                                             Response = update_room_ddb(NewRoom),
                                             case Response of

@@ -15,6 +15,8 @@
 -export([connect_send_message/3, connect_send_private_message/3, connect_receive_messages/1]).
 -export([test_clients/0, test_rooms/0, test_private_messages/0, test_private_rooms/0]).
 
+-include("server_message_pb.hrl").
+
 start(_StartType, _StartArgs) ->
     client_sup:start_link().
 
@@ -125,10 +127,10 @@ test_clients() ->
 test_rooms() ->
     Sock1 = connect("Client1"),
     create_room(Sock1, "TestRoom1"), % Should be OK
-    % Waiting to make sure room has been save on DynamoDB
+    % Waiting to make sure room has been saved on DynamoDB
     timer:sleep(2000),
     create_room(Sock1, "TestRoom2"), % Should be OK
-    % Waiting to make sure room has been save on DynamoDB
+    % Waiting to make sure room has been saved on DynamoDB
     timer:sleep(2000),
     print_rooms(Sock1), % Should print TestRoom1 and TestRoom2
     destroy_room(Sock1, "TestRoom2"), % Should be OK
@@ -143,7 +145,7 @@ test_rooms() ->
     leave_room(Sock2, "TestRoom1"), % Should be OK
     
     create_room(Sock2, "TestRoom3"), % Should be OK
-    % Waiting to make sure room has been save on DynamoDB
+    % Waiting to make sure room has been saved on DynamoDB
     timer:sleep(2000),
     print_rooms(Sock1), % Should print TestRoom1 and TestRoom3
     destroy_room(Sock2, "TestRoom3"), % Should be OK
@@ -174,10 +176,12 @@ test_rooms() ->
 test_private_messages() ->
     Sock6 = connect("Client6"),
     Sock7 = connect("Client7"),
+    timer:sleep(1000), % Waiting to make sure Client7 is connected
     send_private_message(Sock7, "Client8", "Test"), % Should give ERROR
     Sock8 = connect("Client8"),
     Sock9 = connect("Client9"),
     Sock10 = connect("Client10"),
+    timer:sleep(1000), % Waiting to make sure all clients are connected
 
     send_private_message(Sock8, "Client6", "Hi Client6"), % Should be OK
     send_private_message(Sock8, "Client6", "I am Client8"), % Should be OK
@@ -197,12 +201,12 @@ test_private_rooms() ->
     Sock13 = connect("Client13"),
 
     create_room(Sock11, "Test2Room1"), % Should be OK
-    % Waiting to make sure room has been save on DynamoDB
+    % Waiting to make sure room has been saved on DynamoDB
     timer:sleep(2000),
     send_room_invite(Sock11, "Test2Room1", "Client12"), % Should give ERROR
 
     create_private_room(Sock11, "TestPrivateRoom1"), % Should be OK
-    % Waiting to make sure room has been save on DynamoDB
+    % Waiting to make sure room has been saved on DynamoDB
     timer:sleep(2000),
     send_room_invite(Sock11, "Test2Room9", "Client12"), % Should give ERROR
     send_room_invite(Sock13, "TestPrivateRoom1", "Client12"), % Should give ERROR
@@ -210,11 +214,14 @@ test_private_rooms() ->
 
     receive_private_room_invitation(Sock12),
 
-    print_rooms(Sock13), % Should print Room1
-    print_rooms(Sock12), % Should print TestPrivateRoom1 and Room1
+    print_rooms(Sock13), % Should print Test2Room1
+    print_rooms(Sock12), % Should print TestPrivateRoom1 and Test2Room1
 
     join_room(Sock13, "TestPrivateRoom1"), % Should give ERROR
     join_room(Sock12, "TestPrivateRoom1"), % Should be OK
+
+    destroy_room(Sock11, "TestPrivateRoom1"), % Should be OK
+    destroy_room(Sock11, "Test2Room1"), % Should be OK
 
     gen_tcp:close(Sock11),
     gen_tcp:close(Sock12),
@@ -222,78 +229,81 @@ test_private_rooms() ->
 
 % Utility internal methods
 create_room(Sock, RoomName) ->
-    Packet = {create_room, RoomName},
-    gen_tcp:send(Sock, term_to_binary(Packet)).
+    ServerMessage = #'ServerMessage'{action = 'CREATE_ROOM', payload = {room, #'Room'{name = RoomName}}},
+    gen_tcp:send(Sock, server_message_pb:encode_msg(ServerMessage)).
 
 create_private_room(Sock, RoomName) ->
-    Packet = {create_private_room, RoomName},
-    gen_tcp:send(Sock, term_to_binary(Packet)).
+    ServerMessage = #'ServerMessage'{action = 'CREATE_PRIVATE_ROOM', payload = {room, #'Room'{name = RoomName}}},
+    gen_tcp:send(Sock, server_message_pb:encode_msg(ServerMessage)).
 
 join_room(Sock, RoomName) ->
-    Packet = {join_room, RoomName},
-    gen_tcp:send(Sock, term_to_binary(Packet)).
+    ServerMessage = #'ServerMessage'{action = 'JOIN_ROOM', payload = {room, #'Room'{name = RoomName}}},
+    gen_tcp:send(Sock, server_message_pb:encode_msg(ServerMessage)).
 
 leave_room(Sock, RoomName) ->
-    Packet = {leave_room, RoomName},
-    gen_tcp:send(Sock, term_to_binary(Packet)).
+    ServerMessage = #'ServerMessage'{action = 'LEAVE_ROOM', payload = {room, #'Room'{name = RoomName}}},
+    gen_tcp:send(Sock, server_message_pb:encode_msg(ServerMessage)).
 
 print_rooms(Sock) ->
-    Packet = {list_rooms, {}},
-    gen_tcp:send(Sock, term_to_binary(Packet)),
+    ServerMessage = #'ServerMessage'{action = 'LIST_ROOMS'},
+    gen_tcp:send(Sock, server_message_pb:encode_msg(ServerMessage)),
+
     case gen_tcp:recv(Sock, 0, 5000) of
         {ok, ReceivedPacket} ->
-            Tuple = binary_to_term(ReceivedPacket),
-            Type = element(1, Tuple),
-            Payload = element(2, Tuple),
+            % ReceivedPacket is a protobuf encoded msg
+            NewMessage = server_message_pb:decode_msg(ReceivedPacket, 'ServerMessage'),
 
-            case Type of
-                list_rooms ->
-                    % Payload is list of rooms
+            case NewMessage#'ServerMessage'.action of
+                'LIST_ROOMS' ->
+                    ListRoomsProto = element(2, NewMessage#'ServerMessage'.payload),
+                    Rooms = ListRoomsProto#'RoomsList'.rooms,
                     io:format("Available rooms:~n", []),
-                    [io:format(" - ~s~n", [Room]) || Room <- Payload]
+                    [io:format(" - ~s~n", [Room#'Room'.name]) || Room <- Rooms]
             end;
         {error, _} ->
             ok
     end.
 
 destroy_room(Sock, RoomName) ->
-    Packet = {destroy_room, RoomName},
-    gen_tcp:send(Sock, term_to_binary(Packet)).
+    ServerMessage = #'ServerMessage'{action = 'DESTROY_ROOM', payload = {room, #'Room'{name = RoomName}}},
+    gen_tcp:send(Sock, server_message_pb:encode_msg(ServerMessage)).
 
 send_message(Sock, RoomName, Message) ->
-    Packet = {send_msg_room, {RoomName, Message}},
-    gen_tcp:send(Sock, term_to_binary(Packet)).
+    ServerMessage = #'ServerMessage'{action = 'SEND_MSG_ROOM', payload = {msgToRoom, #'SendMessageToRoom'{room = #'Room'{name = RoomName}, message = Message}}},
+    gen_tcp:send(Sock, server_message_pb:encode_msg(ServerMessage)).
 
 send_private_message(Sock, ClientName, Message) ->
-    Packet = {private_message, {ClientName, Message}},
-    gen_tcp:send(Sock, term_to_binary(Packet)).
+    ServerMessage = #'ServerMessage'{action = 'SEND_PRIVATE_MESSAGE', payload = {sendPrivateMsg, #'SendPrivateMessage'{client = #'Client'{name = ClientName}, message = Message}}},
+    gen_tcp:send(Sock, server_message_pb:encode_msg(ServerMessage)).
 
-send_room_invite(Sock, ClientName, RoomName) ->
-    Packet = {send_room_invite, {ClientName, RoomName}},
-    gen_tcp:send(Sock, term_to_binary(Packet)).
+send_room_invite(Sock, RoomName, ClientName) ->
+    ServerMessage = #'ServerMessage'{action = 'SEND_ROOM_INVITE', payload = {invite, #'InviteToRoom'{room = #'Room'{name = RoomName}, client = #'Client'{name = ClientName}}}},
+    gen_tcp:send(Sock, server_message_pb:encode_msg(ServerMessage)).
 
 receive_message(Sock) ->
     case gen_tcp:recv(Sock, 0) of
         {ok, ReceivedPacket} ->
-            Tuple = binary_to_term(ReceivedPacket),
-            Type = element(1, Tuple),
-            Payload = element(2, Tuple),
+            % ReceivedPacket is a protobuf encoded msg
+            ServerMessage = server_message_pb:decode_msg(ReceivedPacket, 'ServerMessage'),
 
-            case Type of
-                room_message ->
-                    Sender = element(1, Payload),
-                    Room = element(2, Payload),
-                    Message = element(3, Payload),
+            case ServerMessage#'ServerMessage'.action of
+                'ROOM_MESSAGE' ->
+                    RoomMessageProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    Sender = RoomMessageProto#'RoomMessage'.sender,
+                    Room = RoomMessageProto#'RoomMessage'.roomName,
+                    Message = RoomMessageProto#'RoomMessage'.message,
 
                     io:format("[~s] ~s: ~s~n", [Room, Sender, Message]);
-                private_message ->
-                    Sender = element(1, Payload),
-                    Message = element(2, Payload),
+                'PRIVATE_MESSAGE' ->
+                    PrivateMessageProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    Sender = PrivateMessageProto#'PrivateMessage'.sender,
+                    Message = PrivateMessageProto#'PrivateMessage'.message,
 
                     io:format("[PM] ~s: ~s~n", [Sender, Message]);
-                private_room_invitation ->
-                    Sender = element(1, Payload),
-                    Room = element(2, Payload),
+                'ROOM_INVITATION' ->
+                    RoomInvitationProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    Sender = RoomInvitationProto#'RoomInvitation'.sender,
+                    Room = RoomInvitationProto#'RoomInvitation'.roomName,
 
                     io:format("[Invitation] '~s' invited you to join private room '~s'~n", [Sender, Room])
             end;
@@ -305,14 +315,14 @@ receive_message(Sock) ->
 receive_private_room_invitation(Sock) ->
     case gen_tcp:recv(Sock, 0) of
         {ok, ReceivedPacket} ->
-            Tuple = binary_to_term(ReceivedPacket),
-            Type = element(1, Tuple),
-            Payload = element(2, Tuple),
+            % ReceivedPacket is a protobuf encoded msg
+            ServerMessage = server_message_pb:decode_msg(ReceivedPacket, 'ServerMessage'),
 
-            case Type of
-                private_room_invitation ->
-                    Sender = element(1, Payload),
-                    Room = element(2, Payload),
+            case ServerMessage#'ServerMessage'.action of
+                'ROOM_INVITATION' ->
+                    RoomInvitationProto = element(2, ServerMessage#'ServerMessage'.payload),
+                    Sender = RoomInvitationProto#'RoomInvitation'.sender,
+                    Room = RoomInvitationProto#'RoomInvitation'.roomName,
 
                     io:format("[Invitation] '~s' invited you to join private room '~s'~n", [Sender, Room])
             end;
@@ -325,6 +335,6 @@ connect_client(Port, Name) ->
     {ok, Sock} = gen_tcp:connect("localhost", Port, [binary,
                                                      {active, false},
                                                      {packet, 2}]),
-    Packet = {connection, Name},
-    gen_tcp:send(Sock, term_to_binary(Packet)),
+    ServerMessage = #'ServerMessage'{action = 'ADD_CLIENT', payload = {'client', #'Client'{name = Name}}},
+    gen_tcp:send(Sock, server_message_pb:encode_msg(ServerMessage)),
     Sock.
