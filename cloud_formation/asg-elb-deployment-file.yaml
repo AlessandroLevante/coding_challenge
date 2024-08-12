@@ -1,0 +1,4 @@
+template-file-path: cloud_formation/asg-elb-template.yaml
+tags:
+Name: 'gitsync-asg-elb'
+Project: 'coding-challenge'

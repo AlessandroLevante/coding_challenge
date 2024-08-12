@@ -1,0 +1,190 @@
+AWSTemplateFormatVersion: 2010-09-09
+Description: AWS CloudFormation Template for AutoScalingGroup and ElasticLoadBalancer
+
+Resources:
+  VPC:
+    Type: 'AWS::EC2::VPC'
+    Properties:
+      CidrBlock: 10.10.0.0/16
+      EnableDnsSupport: yes
+      EnableDnsHostnames: yes
+
+  InternetGateway:
+    Type: 'AWS::EC2::InternetGateway'
+
+#Attaching Internet Gateway to the VPC
+  InternetGatewayAttachment:
+    Type: 'AWS::EC2::VPCGatewayAttachment'
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: eu-north-1a
+      CidrBlock: 10.10.1.0/24
+      MapPublicIpOnLaunch: yes
+
+  PublicSubnet2:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: eu-north-1b
+      CidrBlock: 10.10.2.0/24
+      MapPublicIpOnLaunch: yes
+
+  PublicSubnet3:
+    Type: 'AWS::EC2::Subnet'
+    Properties:
+      VpcId: !Ref VPC
+      AvailabilityZone: eu-north-1c
+      CidrBlock: 10.10.3.0/24
+      MapPublicIpOnLaunch: yes 
+
+  PublicRouteTable:
+    Type: 'AWS::EC2::RouteTable'
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: 'AWS::EC2::Route'
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+#Associating Subnets to Route Table  
+  PublicSubnet1RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  PublicSubnet2RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2 
+
+  PublicSubnet3RouteTableAssociation:
+    Type: 'AWS::EC2::SubnetRouteTableAssociation'
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet3 
+
+  ServerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Enable Server access via ports 22 (SSH) and 6789 (Server listening port)
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - CidrIp: 0.0.0.0/0
+          FromPort: 22
+          IpProtocol: tcp
+          ToPort: 22
+        - CidrIp: 0.0.0.0/0
+          FromPort: 6789
+          IpProtocol: tcp
+          ToPort: 6789
+
+  LaunchTemplate:
+    Type: 'AWS::EC2::LaunchTemplate'
+    Properties:
+      LaunchTemplateName: ChatServerLaunchTemplate
+      LaunchTemplateData:
+        NetworkInterfaces:
+          - DeviceIndex: 0
+            AssociatePublicIpAddress: yes
+            DeleteOnTermination: yes
+            Groups:
+              - !Ref ServerSecurityGroup
+        ImageId: ami-07a0715df72e58928 # Ubuntu 22.04
+        InstanceType: t3.micro
+        KeyName: ChatServer-CodingChallenge
+        UserData:
+          Fn::Base64: !Sub |
+            #!/bin/bash
+            sudo apt-get update
+            sudo apt-get --assume-yes install git rebar3
+            mkdir erl_kerl
+            cd erl_kerl
+            curl -O https://raw.githubusercontent.com/kerl/kerl/master/kerl
+            chmod a+x kerl
+            cd ..
+            export PATH=/erl_kerl:$PATH
+            kerl version
+            kerl upgrade
+            kerl build 25.3.2.13 25.3.2.13
+            kerl install 25.3.2.13 /.kerl/versions/25.3.2.13
+            kerl list installations
+            . /.kerl/versions/25.3.2.13/activate
+            mkdir github
+            cd github
+            git clone https://github.com/AlessandroLevante/coding_challenge.git
+            cd coding_challenge
+            rebar3 release
+            _build/default/rel/coding_challenge/bin/coding_challenge foreground
+
+  AutoScalingGroup:
+    Type: 'AWS::AutoScaling::AutoScalingGroup'
+    Properties:
+      AvailabilityZones:
+        - eu-north-1a
+        - eu-north-1b
+        - eu-north-1c
+      LaunchTemplate:
+        LaunchTemplateId: !Ref LaunchTemplate
+        Version: !GetAtt LaunchTemplate.LatestVersionNumber
+      MaxSize: '5'
+      MinSize: '2'
+      DesiredCapacity: '2'
+      VPCZoneIdentifier:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+        - !Ref PublicSubnet3
+
+  ApplicationLoadBalancer: 
+    Type: 'AWS::ElasticLoadBalancingV2::LoadBalancer'
+    Properties:
+      SecurityGroups: 
+        - !Ref ServerSecurityGroup
+      Subnets: 
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+        - !Ref PublicSubnet3 
+
+  ALBTargetGroup: 
+    Type: 'AWS::ElasticLoadBalancingV2::TargetGroup'
+    Properties: 
+      HealthCheckIntervalSeconds: '30'
+      HealthCheckTimeoutSeconds: '5'
+      Port: '6789'
+      Protocol: TCP
+      VpcId: !Ref VPC
+                     
+  ScalingPolicy:
+    Type: 'AWS::AutoScaling::ScalingPolicy'
+    Properties:
+      AdjustmentType: ChangeInCapacity
+      AutoScalingGroupName: !Ref AutoScalingGroup
+      ScalingAdjustment: '1'
+
+  CloudWatchAlarm:
+    Type: 'AWS::CloudWatch::Alarm'
+    Properties:
+      EvaluationPeriods: '1'
+      Statistic: Average
+      Threshold: '50'
+      AlarmDescription: Alarm set fo 50% of CPU utilization 
+      Period: '60'
+      AlarmActions:
+        - !Ref ScalingPolicy
+      Namespace: AWS/EC2
+      Dimensions:
+        - Name: AutoScalingGroupName
+          Value:
+            Ref: AutoScalingGroup
+      ComparisonOperator: GreaterThanThreshold
+      MetricName: CPUUtilization

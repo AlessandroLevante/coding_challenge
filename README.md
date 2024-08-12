@@ -11,6 +11,13 @@ Here are the instructions to run this application.
 ## Third-Party Libraries
 - [erlcloud](https://github.com/erlcloud/erlcloud): used to connect to DynamoDB and interact with it, using methods to add, update or remove data from tables.
 
+# AWS access
+It is possible to log in to AWS using an IAM user to see the created EC2 instances, DynamoDB status and other thing created through CloudFormation templates. Here are the credentials
+for the AWS IAM user:
+- [Console link](https://713881814113.signin.aws.amazon.com/console)
+- Username: coding_challenge
+- User ID: 713881814113
+
 ## Run the server application
 
 - Open a terminal inside this project's base folder, then run the command:

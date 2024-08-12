@@ -5,7 +5,6 @@ Resources:
   ChatServer:
     Type: AWS::EC2::Instance
     Properties:
-      AvailabilityZone: eu-north-1a
       ImageId: ami-07a0715df72e58928 # Ubuntu 22.04
       InstanceType: t3.micro
       SecurityGroups:
