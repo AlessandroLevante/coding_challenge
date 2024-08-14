@@ -25,7 +25,6 @@ Resources:
       VpcId: !Ref VPC
       AvailabilityZone: eu-north-1a
       CidrBlock: 10.10.1.0/24
-      MapPublicIpOnLaunch: yes
 
   PublicSubnet2:
     Type: 'AWS::EC2::Subnet'
@@ -33,7 +32,6 @@ Resources:
       VpcId: !Ref VPC
       AvailabilityZone: eu-north-1b
       CidrBlock: 10.10.2.0/24
-      MapPublicIpOnLaunch: yes
 
   PublicSubnet3:
     Type: 'AWS::EC2::Subnet'
@@ -41,8 +39,6 @@ Resources:
       VpcId: !Ref VPC
       AvailabilityZone: eu-north-1c
       CidrBlock: 10.10.3.0/24
-      MapPublicIpOnLaunch: yes 
-
   PublicRouteTable:
     Type: 'AWS::EC2::RouteTable'
     Properties:
